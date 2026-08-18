@@ -1,5 +1,4 @@
 import datetime
-import json
 import os
 import folium
 from folium.plugins import Fullscreen, MeasureControl
@@ -15,8 +14,8 @@ from streamlit_folium import st_folium
 # CONFIGURACIÓN DE PÁGINA
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Alerta Temprana Hidroclimática - Tamburco",
-    page_icon="🌧️",
+    page_title="Alerta Hidroclimática Tamburco",
+    page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -25,16 +24,52 @@ LAT_TAMBURCO = -13.6150
 LON_TAMBURCO = -72.8750
 CENTRO_VALLE = [LAT_TAMBURCO, LON_TAMBURCO]
 
+# Base de conocimiento técnico por zonas de Tamburco
+SECTORES_TAMBURCO = {
+    "Quebrada Marcahuasi": {
+        "coords": [-13.6080, -72.8680],
+        "tipo_suelo": "Depósito coluvial suelto / Relleno",
+        "pendiente": "Alta (>35°)",
+        "umbral_lluvia_72h": 35.0,  # mm
+        "umbral_turbidez": 60.0,    # NTU
+        "peligro_principal": "Flujos de detritos (huaicos) y desborde",
+        "accion": "Monitoreo de cauce y descolmatación preventiva urgente.",
+    },
+    "Sector Umaccata / Laderas": {
+        "coords": [-13.6120, -72.8850],
+        "tipo_suelo": "Arcillas expansivas y esquistos fracturados",
+        "pendiente": "Muy Alta (>40°)",
+        "umbral_lluvia_72h": 30.0,
+        "umbral_turbidez": 40.0,
+        "peligro_principal": "Deslizamiento rotacional en masa por saturación",
+        "accion": "Inspección de grietas de tracción en taludes y canales de coronación.",
+    },
+    "Kerapata / Antabamba Baja": {
+        "coords": [-13.5980, -72.8620],
+        "tipo_suelo": "Suelo agrícola permeable sobre roca",
+        "pendiente": "Media (15° - 25°)",
+        "umbral_lluvia_72h": 50.0,
+        "umbral_turbidez": 80.0,
+        "peligro_principal": "Erosión hídrica superficial y pérdida de suelo",
+        "accion": "Mantenimiento de zanjas de infiltración y drenaje pluvial.",
+    },
+    "Faja Marginal Río Mariño (Tamburco)": {
+        "coords": [-13.6200, -72.8720],
+        "tipo_suelo": "Aluvial y desmonte antrópico",
+        "pendiente": "Baja (<10° en fondo de valle)",
+        "umbral_lluvia_72h": 45.0,
+        "umbral_turbidez": 100.0,
+        "peligro_principal": "Socavación de defensas ribereñas y desbordes",
+        "accion": "Fiscalización de faja marginal (Ley 29338) y retiro de desmonte.",
+    },
+}
+
 
 # ---------------------------------------------------------
-# INGESTA DE DATOS METEOROLÓGICOS REALES (OPEN-METEO API)
+# OBTENCIÓN DE DATOS REALES (APIs ABIERTAS)
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600 * 3)
 def obtener_precipitacion_real():
-    """Descarga lluvia real diaria reciente (30 días) y pronóstico para Tamburco."""
-    hoy = datetime.date.today()
-    inicio = hoy - datetime.timedelta(days=30)
-
     url = (
         f"https://api.open-meteo.com/v1/forecast?latitude={LAT_TAMBURCO}&longitude={LON_TAMBURCO}"
         f"&daily=precipitation_sum,precipitation_hours&timezone=America%2FLima"
@@ -48,35 +83,23 @@ def obtener_precipitacion_real():
             {
                 "fecha": pd.to_datetime(data["daily"]["time"]),
                 "lluvia_mm": data["daily"]["precipitation_sum"],
-                "horas_lluvia": data["daily"]["precipitation_hours"],
             }
         )
-        df["acumulada_3d"] = (
-            df["lluvia_mm"].rolling(window=3, min_periods=1).sum()
-        )
-        df["acumulada_7d"] = (
-            df["lluvia_mm"].rolling(window=7, min_periods=1).sum()
-        )
+        df["acum_72h"] = df["lluvia_mm"].rolling(window=3, min_periods=1).sum()
+        df["acum_7d"] = df["lluvia_mm"].rolling(window=7, min_periods=1).sum()
         return df
     except Exception:
-        # Respaldo sintético en caso de corte
+        hoy = datetime.date.today()
         fechas = pd.date_range(end=hoy, periods=30)
         lluvia = np.random.gamma(shape=2, scale=3, size=30)
-        df = pd.DataFrame(
-            {"fecha": fechas, "lluvia_mm": lluvia, "horas_lluvia": lluvia * 0.8}
-        )
-        df["acumulada_3d"] = (
-            df["lluvia_mm"].rolling(window=3, min_periods=1).sum()
-        )
-        df["acumulada_7d"] = (
-            df["lluvia_mm"].rolling(window=7, min_periods=1).sum()
-        )
+        df = pd.DataFrame({"fecha": fechas, "lluvia_mm": lluvia})
+        df["acum_72h"] = df["lluvia_mm"].rolling(window=3, min_periods=1).sum()
+        df["acum_7d"] = df["lluvia_mm"].rolling(window=7, min_periods=1).sum()
         return df
 
 
 @st.cache_data(ttl=3600 * 12)
 def obtener_indices_oceanicos():
-    """Descarga los últimos datos mensuales de anomalía Niño 3.4 desde NOAA."""
     url = "https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt"
     try:
         resp = requests.get(url, timeout=8)
@@ -112,155 +135,137 @@ def cargar_vectorial_local():
     return None
 
 
-# Carga de datos
-gdf_rios = cargar_vectorial_local()
 df_lluvia = obtener_precipitacion_real()
 df_oni = obtener_indices_oceanicos()
+gdf_rios = cargar_vectorial_local()
 
-# Variables clave en tiempo real
-lluvia_hoy = (
-    df_lluvia.iloc[-1]["lluvia_mm"] if not df_lluvia.empty else 0.0
-)
-lluvia_acum_3d = (
-    df_lluvia.iloc[-1]["acumulada_3d"] if not df_lluvia.empty else 0.0
-)
-lluvia_acum_7d = (
-    df_lluvia.iloc[-1]["acumulada_7d"] if not df_lluvia.empty else 0.0
-)
+lluvia_72h = df_lluvia.iloc[-1]["acum_72h"] if not df_lluvia.empty else 0.0
+lluvia_7d = df_lluvia.iloc[-1]["acum_7d"] if not df_lluvia.empty else 0.0
 ultima_anomalia = df_oni.iloc[-1]["ANOM"] if not df_oni.empty else 0.0
 
 # ---------------------------------------------------------
-# BARRA LATERAL: ENTRADA DE DATOS DE CAMPO
+# BARRA LATERAL (DATOS FÁCILES DE CAMPO)
 # ---------------------------------------------------------
 with st.sidebar:
-    st.header("🎛️ Datos de Campo & Captaciones")
-    st.markdown("**Sector de Estudio:** Microcuenca Mariño / Tamburco")
+    st.image(
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cf/Flag_of_Peru.svg/320px-Flag_of_Peru.svg.png",
+        width=40,
+    )
+    st.title("Distrito de Tamburco")
+    st.caption("Panel de Control Hidrometeorológico")
     st.divider()
 
-    st.subheader("💧 Registro de Turbidez (NTU)")
-    turbidez_actual = st.number_input(
-        "Turbidez en Captación (NTU):",
+    st.subheader("📍 Sector a Evaluar")
+    zona_seleccionada = st.selectbox(
+        "Selecciona el Sector Crítico:",
+        list(SECTORES_TAMBURCO.keys()),
+    )
+
+    st.subheader("💧 Medición de Turbidez")
+    turbidez = st.number_input(
+        "Turbidez en Captación / Cauce (NTU):",
         min_value=0.0,
         max_value=1000.0,
-        value=18.5,
-        step=1.0,
-        help="Valores superiores a 50 NTU indican fuerte arrastre de sedimentos en cabecera.",
-    )
-
-    punto_captacion = st.selectbox(
-        "Punto de Monitoreo:",
-        [
-            "Captación Quebrada Marcahuasi",
-            "Captación Sahuanay Alta",
-            "Bocatoma Río Mariño",
-            "Manantial Umaccata",
-        ],
+        value=22.0,
+        step=5.0,
+        help="Normal: < 10 NTU | Alerta: > 40 NTU | Crítico: > 100 NTU",
     )
 
     st.divider()
-    st.subheader("🗺️ Capas Satelitales")
-    tipo_mapa = st.radio(
-        "Capa Espectral Base:",
-        [
-            "🌿 NDVI Satelital (NASA - Verde Vivo)",
-            "🛰️ Satélite Natural (ESRI)",
-            "🗺️ Mapa Urbano (CartoDB)",
-        ],
-        index=0,
+    st.subheader("🛰️ Opciones de Mapa")
+    capa_mapa = st.radio(
+        "Fondo Satelital:",
+        ["🌿 NDVI (Vegetación Viva)", "🛰️ Satélite Natural (ESRI)", "🗺️ Mapa Claro"],
     )
-    ver_fajas = st.checkbox("Faja Marginal (Buffer 25m)", value=True)
+    ver_faja = st.checkbox("Mostrar Fajas Marginales (25m)", value=True)
 
 # ---------------------------------------------------------
-# EVALUACIÓN DEL UMBRAL DE DISPARO DE DESLIZAMIENTO
+# CÁLCULO DE RIESGO PARA LA ZONA SELECCIONADA
 # ---------------------------------------------------------
-# Criterio geotécnico: Lluvia antecedente acumulada > 40 mm en 72h + Turbidez > 50 NTU
-riesgo_deslizamiento = "BAJO"
-color_alerta = "success"
+info_zona = SECTORES_TAMBURCO[zona_seleccionada]
 
-if lluvia_acum_3d >= 45.0 or turbidez_actual >= 100.0:
-    riesgo_deslizamiento = "ALTO / CRÍTICO"
-    color_alerta = "error"
-elif lluvia_acum_3d >= 25.0 or turbidez_actual >= 40.0:
-    riesgo_deslizamiento = "MODERADO"
-    color_alerta = "warning"
+# Algoritmo de Riesgo
+score_lluvia = lluvia_72h / info_zona["umbral_lluvia_72h"]
+score_turbidez = turbidez / info_zona["umbral_turbidez"]
+score_total = (score_lluvia * 0.6) + (score_turbidez * 0.4)
+
+if score_total >= 1.0 or lluvia_72h >= 45.0 or turbidez >= 100.0:
+    estado_alerta = "ALERTA ROJA (Riesgo Crítico)"
+    color_banner = "#e63946"
+    icono_alerta = "🚨"
+elif score_total >= 0.65 or lluvia_72h >= 25.0 or turbidez >= 40.0:
+    estado_alerta = "ALERTA AMARILLA (Riesgo Moderado)"
+    color_banner = "#f4a261"
+    icono_alerta = "⚠️"
+else:
+    estado_alerta = "ALERTA VERDE (Condición Estable)"
+    color_banner = "#2a9d8f"
+    icono_alerta = "✅"
 
 # ---------------------------------------------------------
 # CUERPO PRINCIPAL
 # ---------------------------------------------------------
-st.title("🛰️ Sistema de Alerta Temprana: Lluvias, NDVI & Geodinámica")
-st.caption(
-    "Monitoreo integrado de precipitación real antecedente, vigor vegetal y turbidez de cauces en Tamburco y Abancay."
+st.title("🛡️ Centro de Monitoreo Hidrológico & Laderas - Tamburco")
+
+# Banner Dinámico de Alerta
+st.markdown(
+    f"""
+    <div style="background-color:{color_banner}; padding:15px; border-radius:10px; color:white; margin-bottom:20px;">
+        <h3 style="margin:0; color:white;">{icono_alerta} {estado_alerta} en {zona_seleccionada}</h3>
+        <p style="margin:5px 0 0 0; font-size:15px;">
+            <b>Peligro evaluado:</b> {info_zona['peligro_principal']}.<br>
+            <b>Acción recomendada:</b> {info_zona['accion']}
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-tab_mapa, tab_lluvia, tab_enos, tab_matriz = st.tabs(
+tab_mapa, tab_zonas, tab_lluvia, tab_clima = st.tabs(
     [
-        "🗺️ Visor Espacial & NDVI",
-        "🌧️ Lluvia Real & Histórica (mm)",
-        "📈 Dinámica ENOS",
-        "⚠️ Matriz de Alerta Geodinámica",
+        "🗺️ Visor Geográfico & NDVI",
+        "🎯 Evaluación por Sectores",
+        "🌧️ Lluvias Reales (mm)",
+        "📈 Fenómeno El Niño",
     ]
 )
 
 # ---------------------------------------------------------
-# TAB 1: MAPA + NDVI
+# TAB 1: VISOR GEOGRÁFICO
 # ---------------------------------------------------------
 with tab_mapa:
-    col_m, col_kpi = st.columns([3, 1])
+    col_mapa, col_metricas = st.columns([3, 1])
 
-    with col_kpi:
-        st.markdown("#### Indicadores en Tiempo Real")
-        if color_alerta == "error":
-            st.error(f"🚨 Riesgo de Ladera: {riesgo_deslizamiento}")
-        elif color_alerta == "warning":
-            st.warning(f"⚠️ Riesgo de Ladera: {riesgo_deslizamiento}")
-        else:
-            st.success(f"✅ Riesgo de Ladera: {riesgo_deslizamiento}")
+    with col_metricas:
+        st.markdown("#### Datos en Tiempo Real")
+        st.metric("Lluvia Acumulada 72h", f"{lluvia_72h:.1f} mm", "Últimos 3 días")
+        st.metric("Lluvia Acumulada 7d", f"{lluvia_7d:.1f} mm", "Saturación semanal")
+        st.metric("Turbidez de Agua", f"{turbidez:.1f} NTU", zona_seleccionada)
+        st.metric("Anomalía El Niño", f"+{ultima_anomalia:.2f} °C", "Pacífico Central")
 
-        st.metric(
-            label="Lluvia Acumulada 72h",
-            value=f"{lluvia_acum_3d:.1f} mm",
-            delta="Últimos 3 días",
-        )
-        st.metric(
-            label="Turbidez Registrada",
-            value=f"{turbidez_actual:.1f} NTU",
-            delta=punto_captacion,
-        )
+    with col_mapa:
+        m = folium.Map(location=CENTRO_VALLE, zoom_start=13, tiles="CartoDB positron")
 
-        st.markdown("---")
-        st.markdown("""
-        **Regla de Decisión:**
-        * Si el **NDVI aumenta súbitamente** en quebradas secas + **Lluvia 72h > 40 mm**, hay saturación freática crítica.
-        """)
-
-    with col_m:
-        m = folium.Map(
-            location=CENTRO_VALLE,
-            zoom_start=13,
-            tiles="CartoDB positron",
-            control_scale=True,
-        )
-
-        if tipo_mapa == "🌿 NDVI Satelital (NASA - Verde Vivo)":
+        if capa_mapa == "🌿 NDVI (Vegetación Viva)":
             folium.TileLayer(
                 tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                attr="Esri World Imagery",
+                attr="Esri",
                 name="Satelital Base",
             ).add_to(m)
             folium.WmsTileLayer(
                 url="https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi",
                 layers="MODIS_Terra_NDVI_8Day",
-                name="Índice NDVI (NASA)",
+                name="NDVI NASA",
                 format="image/png",
                 transparent=True,
                 opacity=0.65,
-                attr="NASA EOSDIS GIBS",
+                attr="NASA GIBS",
             ).add_to(m)
-        elif tipo_mapa == "🛰️ Satélite Natural (ESRI)":
+        elif capa_mapa == "🛰️ Satélite Natural (ESRI)":
             folium.TileLayer(
                 tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                attr="Esri World Imagery",
-                name="Esri Satelital",
+                attr="Esri",
+                name="Esri Imagery",
             ).add_to(m)
         else:
             folium.TileLayer(
@@ -270,187 +275,149 @@ with tab_mapa:
                 subdomains="abc",
             ).add_to(m)
 
-        # Capa de Ríos
+        # Red hídrica
         if gdf_rios is not None:
             folium.GeoJson(
                 gdf_rios,
-                name="Red Hídrica ANA",
+                name="Ríos y Quebradas (ANA)",
                 style_function=lambda x: {
-                    "color": "#00f0ff",
+                    "color": "#00d4ff",
                     "weight": 3.5,
                     "opacity": 0.95,
                 },
                 tooltip=folium.GeoJsonTooltip(
-                    fields=[
-                        c
-                        for c in ["nombre", "tipo", "cuenca"]
-                        if c in gdf_rios.columns
-                    ],
-                    aliases=["Cauce:", "Tipo:", "Cuenca:"][: len([c for c in ["nombre", "tipo", "cuenca"] if c in gdf_rios.columns])],
+                    fields=[c for c in ["nombre", "tipo"] if c in gdf_rios.columns],
+                    aliases=["Cauce:", "Tipo:"],
                 ),
             ).add_to(m)
 
         # Faja marginal
-        if gdf_rios is not None and ver_fajas:
-            gdf_buffer = (
-                gdf_rios.to_crs(epsg=32718).buffer(25).to_crs(epsg=4326)
-            )
+        if gdf_rios is not None and ver_faja:
+            gdf_buf = gdf_rios.to_crs(epsg=32718).buffer(25).to_crs(epsg=4326)
             folium.GeoJson(
-                gdf_buffer,
-                name="Faja Marginal (25m)",
+                gdf_buf,
+                name="Fajas Marginales (25m)",
                 style_function=lambda x: {
                     "color": "#ff0055",
                     "weight": 1.5,
                     "fillColor": "#ff0055",
-                    "fillOpacity": 0.35,
+                    "fillOpacity": 0.3,
                 },
             ).add_to(m)
 
-        # Marcador de la Captación Monitoreada
-        folium.Marker(
-            location=[-13.6080, -72.8720],
-            popup=f"<b>{punto_captacion}</b><br>Turbidez: {turbidez_actual} NTU",
-            tooltip="Punto de Control Hidrológico",
-            icon=folium.Icon(color="blue", icon="tint", prefix="fa"),
-        ).add_to(m)
+        # Marcadores de sectores de Tamburco
+        for nombre_sec, datos_sec in SECTORES_TAMBURCO.items():
+            color_icono = "red" if nombre_sec == zona_seleccionada and "ROJA" in estado_alerta else ("orange" if nombre_sec == zona_seleccionada and "AMARILLA" in estado_alerta else "blue")
+            folium.Marker(
+                location=datos_sec["coords"],
+                popup=f"<b>{nombre_sec}</b><br>Pendiente: {datos_sec['pendiente']}<br>Peligro: {datos_sec['peligro_principal']}",
+                tooltip=nombre_sec,
+                icon=folium.Icon(color=color_icono, icon="exclamation-triangle" if color_icono != "blue" else "info-sign", prefix="glyphicon"),
+            ).add_to(m)
 
         Fullscreen().add_to(m)
         MeasureControl(position="bottomleft").add_to(m)
         folium.LayerControl(position="topright").add_to(m)
 
-        st_folium(m, width="100%", height=550, returned_objects=[])
+        st_folium(m, width="100%", height=530, returned_objects=[])
 
 # ---------------------------------------------------------
-# TAB 2: LLUVIA REAL E HISTÓRICO COMPARATIVO
+# TAB 2: EVALUACIÓN SECTORIZADA POR ZONAS
+# ---------------------------------------------------------
+with tab_zonas:
+    st.subheader(f"🔍 Ficha Técnica de Vulnerabilidad: {zona_seleccionada}")
+
+    col_z1, col_z2 = st.columns(2)
+    with col_z1:
+        st.markdown(f"""
+        * **Topografía:** {info_zona['pendiente']}
+        * **Composición Geológica:** {info_zona['tipo_suelo']}
+        * **Peligro Recurrente:** {info_zona['peligro_principal']}
+        """)
+    with col_z2:
+        st.markdown(f"""
+        * **Umbral Crítico de Lluvia (72h):** `{info_zona['umbral_lluvia_72h']} mm` (Actual: **{lluvia_72h:.1f} mm**)
+        * **Umbral Crítico de Turbidez:** `{info_zona['umbral_turbidez']} NTU` (Actual: **{turbidez:.1f} NTU**)
+        * **Porcentaje de Saturación Estimado:** `{min(int(score_total * 100), 100)}%`
+        """)
+
+    st.progress(min(score_total / 1.5, 1.0))
+
+    st.markdown("### 📋 Comparativa Rápida de Todos los Sectores")
+    tabla_sectores = []
+    for s_nom, s_dat in SECTORES_TAMBURCO.items():
+        s_score = (lluvia_72h / s_dat["umbral_lluvia_72h"] * 0.6) + (turbidez / s_dat["umbral_turbidez"] * 0.4)
+        s_nivel = "🔴 Crítico" if s_score >= 1.0 else ("🟡 Moderado" if s_score >= 0.65 else "🟢 Bajo")
+        tabla_sectores.append({
+            "Sector": s_nom,
+            "Pendiente": s_dat["pendiente"],
+            "Peligro Asociado": s_dat["peligro_principal"],
+            "Nivel de Riesgo Actual": s_nivel,
+        })
+    st.table(pd.DataFrame(tabla_sectores))
+
+# ---------------------------------------------------------
+# TAB 3: LLUVIAS REALES (OPEN-METEO)
 # ---------------------------------------------------------
 with tab_lluvia:
-    st.subheader("Serie Temporal de Precipitación Diaria y Acumulada en Tamburco")
-    st.caption(
-        "Datos reales extraídos vía satélite / reanálisis meteorológico para la coordenada de Tamburco."
-    )
+    st.subheader("Precipitación Diaria Real y Acumulada (Últimos 30 días + Pronóstico)")
 
-    fig_lluvia = go.Figure()
-
-    # Barras de lluvia diaria
-    fig_lluvia.add_trace(
+    fig_l = go.Figure()
+    fig_l.add_trace(
         go.Bar(
             x=df_lluvia["fecha"],
             y=df_lluvia["lluvia_mm"],
             name="Lluvia Diaria (mm)",
             marker_color="#3a86ff",
-            opacity=0.7,
         )
     )
-
-    # Línea de lluvia acumulada 3 días (umbral de saturación)
-    fig_lluvia.add_trace(
+    fig_l.add_trace(
         go.Scatter(
             x=df_lluvia["fecha"],
-            y=df_lluvia["acumulada_3d"],
-            name="Acumulado 72h (mm)",
+            y=df_lluvia["acum_72h"],
+            name="Acumulado 72 horas (mm)",
             mode="lines+markers",
             line=dict(color="#e63946", width=2.5),
         )
     )
-
-    # Umbral de peligro geotécnico (40 mm en 72h)
-    fig_lluvia.add_hline(
+    fig_l.add_hline(
         y=40.0,
         line_dash="dash",
-        line_color="#d90429",
-        annotation_text="Umbral Crítico de Deslizamiento (40 mm / 72h)",
-        annotation_position="top left",
+        line_color="darkred",
+        annotation_text="Umbral Crítico Promedio (40 mm / 72h)",
     )
-
-    fig_lluvia.update_layout(
+    fig_l.update_layout(
         xaxis_title="Fecha",
-        yaxis_title="Precipitación (mm)",
+        yaxis_title="Milímetros (mm)",
         template="plotly_white",
         height=450,
-        hovermode="x unified",
     )
-
-    st.plotly_chart(fig_lluvia, use_container_width=True)
+    st.plotly_chart(fig_l, use_container_width=True)
 
 # ---------------------------------------------------------
-# TAB 3: DINÁMICA ENOS
+# TAB 4: ENOS / EL NIÑO
 # ---------------------------------------------------------
-with tab_enos:
-    st.subheader("Anomalía Térmica en el Pacífico (Índice ONI - Niño 3.4)")
-    fig_oni = go.Figure()
+with tab_clima:
+    st.subheader("Anomalía de Temperatura Superficial del Mar (Índice Niño 3.4)")
+    fig_o = go.Figure()
     periodos = [f"{r.SEAS} {r.YR}" for _, r in df_oni.iterrows()]
 
-    fig_oni.add_trace(
+    fig_o.add_trace(
         go.Scatter(
             x=periodos,
             y=df_oni["ANOM"],
             mode="lines+markers",
-            name="Anomalía TSM (°C)",
-            line=dict(color="#e63946", width=3),
-            marker=dict(size=7, color="#1d3557"),
+            name="Anomalía (°C)",
+            line=dict(color="#d62828", width=2.5),
             fill="tozeroy",
-            fillcolor="rgba(230, 57, 70, 0.15)",
         )
     )
-    fig_oni.add_hline(
-        y=2.0,
-        line_dash="dash",
-        line_color="#780000",
-        annotation_text="Niño Fuerte (+2.0 °C)",
-    )
-    fig_oni.add_hline(
-        y=1.0,
-        line_dash="dot",
-        line_color="#d62828",
-        annotation_text="Niño Moderado (+1.0 °C)",
-    )
-    fig_oni.add_hline(
-        y=0.5,
-        line_dash="dot",
-        line_color="#f77f00",
-        annotation_text="Niño Débil (+0.5 °C)",
-    )
-
-    fig_oni.update_layout(
-        xaxis_title="Trimestre Móvil",
-        yaxis_title="Anomalía (°C)",
+    fig_o.add_hline(y=2.0, line_dash="dash", line_color="darkred", annotation_text="Niño Fuerte (+2.0 °C)")
+    fig_o.add_hline(y=0.5, line_dash="dot", line_color="orange", annotation_text="Niño Débil (+0.5 °C)")
+    fig_o.update_layout(
+        xaxis_title="Periodo Móvil",
+        yaxis_title="Anomalía Térmica (°C)",
         template="plotly_white",
-        height=430,
-        hovermode="x unified",
+        height=420,
     )
-    st.plotly_chart(fig_oni, use_container_width=True)
-
-# ---------------------------------------------------------
-# TAB 4: MATRIZ DE CORRELACIÓN Y ALERTA
-# ---------------------------------------------------------
-with tab_matriz:
-    st.markdown("### 🔬 Correlación Multi-Criterio de Riesgo de Deslizamiento")
-    st.markdown("""
-    Este módulo cruza los **tres factores físicos determinantes** en el valle de Tamburco:
-    1. **Precipitación antecedente:** El suelo pierde cohesión tras 3 a 5 días de lluvia continua.
-    2. **Respuesta en Captación (Turbidez):** Un aumento brusco de NTU sin lluvia local severa indica erosión/movimiento de masa en las partes altas.
-    3. **Índice Espectral (NDVI):** Muestra el aumento anómalo de verdor en fondos de quebrada por afloramiento freático.
-    """)
-
-    col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        st.info(f"""
-        **Estado Actual de Variables:**
-        * Precipitación 72h: **{lluvia_acum_3d:.1f} mm**
-        * Turbidez en {punto_captacion}: **{turbidez_actual:.1f} NTU**
-        * Estado ENOS Pacífico: **+{ultima_anomalia} °C**
-        """)
-    with col_t2:
-        if riesgo_deslizamiento == "ALTO / CRÍTICO":
-            st.error("""
-            **Acción Recomendada:**
-            * Inspección inmediata en quebradas Marcahuasi y Sahuanay.
-            * Monitoreo de grietas en sectores Umaccata y Bellavista.
-            * Notificación al área de Gestión del Riesgo de Desastres.
-            """)
-        else:
-            st.success("""
-            **Acción Recomendada:**
-            * Mantener vigilancia de rutina y aforos en captaciones.
-            * Verificar limpieza periódica de fajas marginales.
-            """)
+    st.plotly_chart(fig_o, use_container_width=True)
