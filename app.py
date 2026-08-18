@@ -78,13 +78,13 @@ with st.sidebar:
     ver_rios = st.checkbox("Cauces y Quebradas (ANA)", value=True)
     ver_fajas = st.checkbox("Zona de Faja Marginal (Buffer 25m)", value=False)
 
-    st.subheader("Capas Satelitales")
+    st.subheader("Capas Base y Vegetación")
     tipo_mapa = st.radio(
-        "Capa Satelital Base:",
+        "Seleccionar Vista:",
         [
+            "Relieve y Vegetación de Alto Contraste (OpenTopo)",
             "Satélite Natural (ESRI Imagery)",
-            "Vigor Vegetal / Relieve (Sentinel-2 / Topo)",
-            "Mapa Claro Urbano (CartoDB)",
+            "Mapa Base Claro (CartoDB)",
         ],
         index=0,
     )
@@ -128,17 +128,16 @@ with tab_mapa:
             delta="Por saturación",
         )
         st.info(
-            "💡 **Uso operativo:** Alterna la capa base en la barra lateral para inspeccionar el contraste entre vegetación densa, áreas desnudas y zonas construidas."
+            "💡 **Nota técnica:** Selecciona **'Relieve y Vegetación de Alto Contraste'** en el menú lateral para identificar con tonos verdes vivos las áreas de vegetación y cultivos en el cañón del Mariño."
         )
 
     with col_m:
-        # Selección de mosaico base según radio button
-        if tipo_mapa == "Satélite Natural (ESRI Imagery)":
+        if tipo_mapa == "Relieve y Vegetación de Alto Contraste (OpenTopo)":
+            tiles_url = "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png"
+            attr_name = "Map data: &copy; OpenStreetMap contributors, SRTM | Map style: &copy; OpenTopoMap (CC-BY-SA)"
+        elif tipo_mapa == "Satélite Natural (ESRI Imagery)":
             tiles_url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
             attr_name = "Esri World Imagery"
-        elif tipo_mapa == "Vigor Vegetal / Relieve (Sentinel-2 / Topo)":
-            tiles_url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}"
-            attr_name = "Esri World Topo & Vegetation"
         else:
             tiles_url = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
             attr_name = "CartoDB Positron"
@@ -149,15 +148,15 @@ with tab_mapa:
             tiles=tiles_url,
             attr=attr_name,
             control_scale=True,
+            subdomains="abc",
         )
 
-        # Vectorial de ríos
         if gdf_rios is not None and ver_rios:
             folium.GeoJson(
                 gdf_rios,
                 name="Red Hídrica ANA",
                 style_function=lambda x: {
-                    "color": "#00f0ff",
+                    "color": "#003566" if tipo_mapa == "Relieve y Vegetación de Alto Contraste (OpenTopo)" else "#00f0ff",
                     "weight": 3.5,
                     "opacity": 0.95,
                 },
@@ -167,16 +166,15 @@ with tab_mapa:
                 ),
             ).add_to(m)
 
-        # Faja marginal referencial (Buffer)
         if gdf_rios is not None and ver_fajas:
             gdf_buffer = gdf_rios.to_crs(epsg=32718).buffer(25).to_crs(epsg=4326)
             folium.GeoJson(
                 gdf_buffer,
                 name="Faja Marginal (25m)",
                 style_function=lambda x: {
-                    "color": "#ffaa00",
+                    "color": "#d90429",
                     "weight": 1.5,
-                    "fillColor": "#ffaa00",
+                    "fillColor": "#d90429",
                     "fillOpacity": 0.35,
                 },
             ).add_to(m)
