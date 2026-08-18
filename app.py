@@ -42,7 +42,6 @@ def obtener_indices_oceanicos():
         df = pd.DataFrame(data)
         return df.tail(24)
     except Exception:
-        # Respaldo técnico referencial en caso de desconexión
         return pd.DataFrame(
             {
                 "SEAS": ["DJF", "JFM", "FMA", "MAM", "AMJ", "MJJ", "JJA", "JAS"],
@@ -77,11 +76,18 @@ with st.sidebar:
 
     st.subheader("Capas Vectoriales")
     ver_rios = st.checkbox("Cauces y Quebradas (ANA)", value=True)
-    ver_fajas = st.checkbox("Zona de Faja Marginal (Buffer referencial)", value=False)
+    ver_fajas = st.checkbox("Zona de Faja Marginal (Buffer 25m)", value=False)
 
     st.subheader("Capas Satelitales")
-    ver_satelite = st.checkbox("Satélite Alta Resolución (ESRI)", value=True)
-    ver_ndvi = st.checkbox("Índice de Vegetación / Humedad (NDVI)", value=False)
+    tipo_mapa = st.radio(
+        "Capa Satelital Base:",
+        [
+            "Satélite Natural (ESRI Imagery)",
+            "Vigor Vegetal / Relieve (Sentinel-2 / Topo)",
+            "Mapa Claro Urbano (CartoDB)",
+        ],
+        index=0,
+    )
 
     st.divider()
     st.markdown("### 📡 Estado ENOS Global")
@@ -122,30 +128,28 @@ with tab_mapa:
             delta="Por saturación",
         )
         st.info(
-            "💡 **Uso operativo:** Activa la capa de *Faja Marginal* en la barra lateral para identificar tramos con riesgo de desborde sobre áreas construidas o parcelas agrícolas."
+            "💡 **Uso operativo:** Alterna la capa base en la barra lateral para inspeccionar el contraste entre vegetación densa, áreas desnudas y zonas construidas."
         )
 
     with col_m:
-        m = folium.Map(location=CENTRO_VALLE, zoom_start=13, tiles="CartoDB positron")
+        # Selección de mosaico base según radio button
+        if tipo_mapa == "Satélite Natural (ESRI Imagery)":
+            tiles_url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+            attr_name = "Esri World Imagery"
+        elif tipo_mapa == "Vigor Vegetal / Relieve (Sentinel-2 / Topo)":
+            tiles_url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}"
+            attr_name = "Esri World Topo & Vegetation"
+        else:
+            tiles_url = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+            attr_name = "CartoDB Positron"
 
-        # Capa Satelital ESRI
-        if ver_satelite:
-            folium.TileLayer(
-                tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                attr="Esri World Imagery",
-                name="Satelital ESRI",
-            ).add_to(m)
-
-        # Capa NDVI / Sentinel-2 Abierta (WMS)
-        if ver_ndvi:
-            folium.WmsTileLayer(
-                url="https://tiles.maps.eox.at/wms",
-                layers="s2cloudless-2020",
-                name="Vigor Vegetal / Relieve",
-                format="image/png",
-                transparent=True,
-                attr="EOX Sentinel-2 cloudless",
-            ).add_to(m)
+        m = folium.Map(
+            location=CENTRO_VALLE,
+            zoom_start=13,
+            tiles=tiles_url,
+            attr=attr_name,
+            control_scale=True,
+        )
 
         # Vectorial de ríos
         if gdf_rios is not None and ver_rios:
@@ -165,14 +169,13 @@ with tab_mapa:
 
         # Faja marginal referencial (Buffer)
         if gdf_rios is not None and ver_fajas:
-            # Reproyección métrica temporal para buffer de 25m y vuelta a 4326
             gdf_buffer = gdf_rios.to_crs(epsg=32718).buffer(25).to_crs(epsg=4326)
             folium.GeoJson(
                 gdf_buffer,
                 name="Faja Marginal (25m)",
                 style_function=lambda x: {
                     "color": "#ffaa00",
-                    "weight": 1,
+                    "weight": 1.5,
                     "fillColor": "#ffaa00",
                     "fillOpacity": 0.35,
                 },
@@ -207,7 +210,6 @@ with tab_enos:
         )
     )
 
-    # Umbrales
     fig.add_hline(y=2.0, line_dash="dash", line_color="#780000", annotation_text="Niño Fuerte (+2.0 °C)")
     fig.add_hline(y=1.0, line_dash="dot", line_color="#d62828", annotation_text="Niño Moderado (+1.0 °C)")
     fig.add_hline(y=0.5, line_dash="dot", line_color="#f77f00", annotation_text="Niño Débil (+0.5 °C)")
@@ -232,7 +234,7 @@ with tab_gestion:
 
     | Sector / Quebrada | Tipo de Peligro | Criterio Técnico y Legal |
     | :--- | :--- | :--- |
-    | **Quebrada Marcahuasi (Tamburco)** | Desbordes y flujos de lodo | Pendientes pronunciadas con alta acumulación de material coluvial. Requiere descolmatación previa a lluvias pico. |
+    | **Quebrada Marcahuasi (Tamburco)** | Desbordes y flujos de lodo | Pendientes pronunciadas con alta acumulación de material coluvial. Requiere descolmatación periódica. |
     | **Quebrada Sahuanay / Chontay** | Flujos de detritos (huaicos) | Monitoreo de faja marginal (Ley N° 29338). Prohibición de descargas de desmonte y rellenos informales. |
     | **Río Mariño (Eje Colector)** | Avenidas torrenciales | Mantenimiento de defensas ribereñas y vigilancia de puntos de estrangulamiento de cauce. |
     | **Laderas Urbanas (Umaccata/Bellavista)** | Deslizamientos rotacionales | Saturación por lluvias prolongadas. Monitoreo de grietas de tracción en taludes y canales de coronación. |
