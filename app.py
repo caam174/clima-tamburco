@@ -78,13 +78,13 @@ with st.sidebar:
     ver_rios = st.checkbox("Cauces y Quebradas (ANA)", value=True)
     ver_fajas = st.checkbox("Zona de Faja Marginal (Buffer 25m)", value=False)
 
-    st.subheader("Capas Base y Vegetación")
+    st.subheader("Capas Satelitales & NDVI")
     tipo_mapa = st.radio(
-        "Seleccionar Vista:",
+        "Seleccionar Capa Espectral:",
         [
-            "Relieve y Vegetación de Alto Contraste (OpenTopo)",
-            "Satélite Natural (ESRI Imagery)",
-            "Mapa Base Claro (CartoDB)",
+            "🌿 NDVI Satelital (NASA - Verde Vivo)",
+            "🛰️ Satélite Natural (ESRI Alta Resolución)",
+            "🗺️ Mapa Claro Urbano (CartoDB)",
         ],
         index=0,
     )
@@ -127,36 +127,62 @@ with tab_mapa:
             value="Nivel Medio-Alto",
             delta="Por saturación",
         )
-        st.info(
-            "💡 **Nota técnica:** Selecciona **'Relieve y Vegetación de Alto Contraste'** en el menú lateral para identificar con tonos verdes vivos las áreas de vegetación y cultivos en el cañón del Mariño."
-        )
+        st.markdown("""
+        **Guía de Colores NDVI:**
+        * 🟢 **Verde Intenso:** Cultivos bajo riego, vegetación densa y bofedales.
+        * 🟡 **Amarillo / Canela:** Pastos secos y vegetación arbustiva dispersa.
+        * ⚪ **Gris / Rojo claro:** Suelo desnudo, rocas y zonas urbanizadas.
+        """)
 
     with col_m:
-        if tipo_mapa == "Relieve y Vegetación de Alto Contraste (OpenTopo)":
-            tiles_url = "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png"
-            attr_name = "Map data: &copy; OpenStreetMap contributors, SRTM | Map style: &copy; OpenTopoMap (CC-BY-SA)"
-        elif tipo_mapa == "Satélite Natural (ESRI Imagery)":
-            tiles_url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-            attr_name = "Esri World Imagery"
-        else:
-            tiles_url = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-            attr_name = "CartoDB Positron"
-
         m = folium.Map(
             location=CENTRO_VALLE,
             zoom_start=13,
-            tiles=tiles_url,
-            attr=attr_name,
+            tiles="CartoDB positron",
             control_scale=True,
-            subdomains="abc",
         )
 
+        if tipo_mapa == "🌿 NDVI Satelital (NASA - Verde Vivo)":
+            # Capa satelital base de relieve
+            folium.TileLayer(
+                tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                attr="Esri World Imagery",
+                name="Satelital Base",
+            ).add_to(m)
+
+            # Capa WMS oficial de NDVI de NASA GIBS (Índice Verde Espectrométrico)
+            folium.WmsTileLayer(
+                url="https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi",
+                layers="MODIS_Terra_NDVI_8Day",
+                name="Índice NDVI (NASA GIBS)",
+                format="image/png",
+                transparent=True,
+                opacity=0.65,
+                attr="NASA EOSDIS GIBS - NDVI 8-Day",
+            ).add_to(m)
+
+        elif tipo_mapa == "🛰️ Satélite Natural (ESRI Alta Resolución)":
+            folium.TileLayer(
+                tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                attr="Esri World Imagery",
+                name="Esri World Imagery",
+            ).add_to(m)
+
+        else:
+            folium.TileLayer(
+                tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+                attr="CartoDB Positron",
+                name="CartoDB Claro",
+                subdomains="abc",
+            ).add_to(m)
+
+        # Vectorial de ríos
         if gdf_rios is not None and ver_rios:
             folium.GeoJson(
                 gdf_rios,
                 name="Red Hídrica ANA",
                 style_function=lambda x: {
-                    "color": "#003566" if tipo_mapa == "Relieve y Vegetación de Alto Contraste (OpenTopo)" else "#00f0ff",
+                    "color": "#00f0ff",
                     "weight": 3.5,
                     "opacity": 0.95,
                 },
@@ -166,15 +192,16 @@ with tab_mapa:
                 ),
             ).add_to(m)
 
+        # Faja marginal
         if gdf_rios is not None and ver_fajas:
             gdf_buffer = gdf_rios.to_crs(epsg=32718).buffer(25).to_crs(epsg=4326)
             folium.GeoJson(
                 gdf_buffer,
                 name="Faja Marginal (25m)",
                 style_function=lambda x: {
-                    "color": "#d90429",
+                    "color": "#ff0055",
                     "weight": 1.5,
-                    "fillColor": "#d90429",
+                    "fillColor": "#ff0055",
                     "fillOpacity": 0.35,
                 },
             ).add_to(m)
